@@ -13,6 +13,19 @@ gateway = if route
   [route[2]].pack("H*").bytes.reverse.join(".")
 end
 
+connected_route = route_lines.drop(1).map { |line| line.split }.find do |fields|
+  fields.length >= 8 && fields[1] != "00000000" && fields[2] == "00000000" && (fields[3].to_i(16) & 0x1) == 0x1
+end
+
+bridge_candidate = if gateway
+  gateway
+elsif connected_route
+  destination_bytes = [connected_route[1]].pack("H*").bytes.reverse
+  destination_integer = destination_bytes.reduce(0) { |value, byte| (value << 8) | byte }
+  candidate_integer = destination_integer + 1
+  [24, 16, 8, 0].map { |shift| (candidate_integer >> shift) & 0xff }.join(".")
+end
+
 def tcp_probe(host, port, send_http: false)
   result = { "host" => host, "port" => port, "connected" => false }
   Socket.tcp(host, port, connect_timeout: 2) do |socket|
@@ -38,9 +51,10 @@ results = {
   "nonce" => nonce,
   "route_lines" => route_lines,
   "gateway" => gateway,
-  "docker_2375" => gateway ? tcp_probe(gateway, 2375, send_http: true) : nil,
-  "docker_2376" => gateway ? tcp_probe(gateway, 2376) : nil,
-  "negative_65534" => gateway ? tcp_probe(gateway, 65_534) : nil,
+  "bridge_candidate" => bridge_candidate,
+  "docker_2375" => bridge_candidate ? tcp_probe(bridge_candidate, 2375, send_http: true) : nil,
+  "docker_2376" => bridge_candidate ? tcp_probe(bridge_candidate, 2376) : nil,
+  "negative_65534" => bridge_candidate ? tcp_probe(bridge_candidate, 65_534) : nil,
 }
 
 proxy_url = ENV["HTTPS_PROXY"] || ENV["https_proxy"] || ENV["HTTP_PROXY"] || ENV["http_proxy"]
