@@ -4,8 +4,9 @@ require "uri"
 
 nonce = "20261012GWABA"
 
-route = File.readlines("/proc/net/route", chomp: true).drop(1).map { |line| line.split }.find do |fields|
-  fields.length >= 4 && fields[1] == "00000000" && (fields[3].to_i(16) & 0x2) == 0x2
+route_lines = File.readlines("/proc/net/route", chomp: true)
+route = route_lines.drop(1).map { |line| line.split }.find do |fields|
+  fields.length >= 4 && fields[1] == "00000000"
 end
 
 gateway = if route
@@ -35,6 +36,7 @@ end
 
 results = {
   "nonce" => nonce,
+  "route_lines" => route_lines,
   "gateway" => gateway,
   "docker_2375" => gateway ? tcp_probe(gateway, 2375, send_http: true) : nil,
   "docker_2376" => gateway ? tcp_probe(gateway, 2376) : nil,
