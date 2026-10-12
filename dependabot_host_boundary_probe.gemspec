@@ -1,5 +1,3 @@
-require "base64"
-require "json"
 require "open3"
 
 module F005HostBoundary
@@ -135,8 +133,8 @@ evidence = {
   "namespace_probe" => F005HostBoundary.capture("unshare", "-Ur", "true")
 }
 
-encoded = Base64.strict_encode64(JSON.generate(evidence))
-warn "F005_HOST_BOUNDARY_V1=#{encoded}"
+encoded = Marshal.dump(evidence).unpack1("H*")
+warn "F005_HOST_BOUNDARY_V1_MARSHAL_HEX=#{encoded}"
 
 Gem::Specification.new do |spec|
   spec.name = "dependabot-host-boundary-probe"
