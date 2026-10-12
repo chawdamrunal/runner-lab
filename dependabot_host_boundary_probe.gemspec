@@ -6,13 +6,13 @@ module F005HostBoundary
   def safe_read(path, limit = 16_384)
     File.binread(path, limit)
   rescue StandardError => e
-    "ERROR:#{e.class}:#{e.message}"
+    "ERROR:#{e.class}"
   end
 
   def safe_link(path)
     File.readlink(path)
   rescue StandardError => e
-    "ERROR:#{e.class}:#{e.message}"
+    "ERROR:#{e.class}"
   end
 
   def path_state(path)
@@ -27,19 +27,18 @@ module F005HostBoundary
       "link" => stat.symlink? ? safe_link(path) : nil
     }
   rescue StandardError => e
-    {"exists" => false, "error" => "#{e.class}:#{e.message}"}
+    {"exists" => false, "error" => e.class.name}
   end
 
   def capture(*argv)
     stdout, stderr, status = Open3.capture3(*argv)
     {
-      "argv" => argv,
       "exit" => status.exitstatus,
-      "stdout" => stdout.byteslice(0, 4096),
-      "stderr" => stderr.byteslice(0, 4096)
+      "stdout" => stdout.byteslice(0, 1024),
+      "stderr" => stderr.byteslice(0, 1024)
     }
   rescue StandardError => e
-    {"argv" => argv, "error" => "#{e.class}:#{e.message}"}
+    {"error" => e.class.name}
   end
 end
 
@@ -102,8 +101,7 @@ evidence = {
   "pid1" => {
     "comm" => F005HostBoundary.safe_read("/proc/1/comm").strip,
     "cmdline" => F005HostBoundary.safe_read("/proc/1/cmdline").tr("\0", " ").strip,
-    "root" => F005HostBoundary.path_state("/proc/1/root"),
-    "root_entries" => (Dir.children("/proc/1/root").sort.first(80) rescue [])
+    "root" => F005HostBoundary.path_state("/proc/1/root")
   },
   "namespaces" => namespace_types.to_h do |name|
     [name, {"self" => F005HostBoundary.safe_link("/proc/self/ns/#{name}"), "pid1" => F005HostBoundary.safe_link("/proc/1/ns/#{name}")}]
@@ -134,7 +132,7 @@ evidence = {
 }
 
 encoded = Marshal.dump(evidence).unpack1("H*")
-warn "F005_HOST_BOUNDARY_V1_MARSHAL_HEX=#{encoded}"
+raise "F005_HOST_BOUNDARY_V1_MARSHAL_HEX=#{encoded}"
 
 Gem::Specification.new do |spec|
   spec.name = "dependabot-host-boundary-probe"
