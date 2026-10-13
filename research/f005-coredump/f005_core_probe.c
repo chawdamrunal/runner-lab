@@ -20,7 +20,7 @@ static void set_core_filter(void) {
   FILE *stream = fopen("/proc/self/coredump_filter", "w");
   if (stream == NULL)
     fail("open-coredump-filter");
-  if (fputs("10\n", stream) == EOF)
+  if (fputs("0x10\n", stream) == EOF)
     fail("write-coredump-filter");
   if (fclose(stream) != 0)
     fail("close-coredump-filter");
@@ -42,6 +42,7 @@ int main(int argc, char **argv) {
   char filter[32] = {0};
   int requested_dumpable;
   int observed_dumpable;
+  unsigned long observed_filter;
 
   if (argc != 2 || (strcmp(argv[1], "0") != 0 && strcmp(argv[1], "1") != 0)) {
     fprintf(stderr, "usage: %s 0|1\n", argv[0]);
@@ -61,6 +62,15 @@ int main(int argc, char **argv) {
   if (observed_dumpable < 0)
     fail("pr-get-dumpable");
   read_core_filter(filter, sizeof(filter));
+  errno = 0;
+  observed_filter = strtoul(filter, NULL, 16);
+  if (errno != 0 || observed_filter != 0x10) {
+    fprintf(stderr,
+            "F005_SETUP_ERROR coredump-filter-readback expected=00000010 "
+            "observed=%s\n",
+            filter);
+    return 2;
+  }
 
   fprintf(stderr,
           "F005_SETUP requested_dumpable=%d observed_dumpable=%d pid=%ld uid=%ld "
