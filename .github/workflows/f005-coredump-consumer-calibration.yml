@@ -1,0 +1,171 @@
+name: f005-coredump-consumer-calibration
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  controlled-calibration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      UPDATER_IMAGE: ghcr.io/dependabot/dependabot-updater-bundler:v2.0.20261007230529@sha256:0c3e2ed47adc7b21b82ac89c11a8768ae69c839c01f99b609f187fddd3431f89
+      F005_CANARY: F005-CORE-PARSER-20261013-B1
+    steps:
+      - name: Check out the owned harness
+        uses: actions/checkout@v4
+
+      - name: Bind the host consumer and compile the controlled ELF
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/f005-coredump-evidence"
+          mkdir -p "$evidence"
+
+          {
+            printf 'run_id=%s\n' "$GITHUB_RUN_ID"
+            printf 'run_attempt=%s\n' "$GITHUB_RUN_ATTEMPT"
+            printf 'repository=%s\n' "$GITHUB_REPOSITORY"
+            printf 'runner_image=%s\n' "${ImageOS:-unknown}"
+            printf 'runner_image_version=%s\n' "${ImageVersion:-unknown}"
+            uname -a
+            printf 'core_pattern=' && cat /proc/sys/kernel/core_pattern
+            printf 'core_pipe_limit=' && cat /proc/sys/kernel/core_pipe_limit
+            printf 'suid_dumpable=' && cat /proc/sys/fs/suid_dumpable
+            dpkg-query -W -f='${Package}=${Version}\n' \
+              systemd systemd-coredump libdw1t64 libelf1t64 libzstd1 2>&1 || true
+            sudo systemctl cat systemd-coredump.socket systemd-coredump@.service
+          } | tee "$evidence/host-controls.txt"
+
+          package_json=$(jq -cn --arg canary "$F005_CANARY" '{
+            type: "github-bounty-research",
+            os: "ubuntu",
+            osVersion: "24.04",
+            name: "f005-core-probe",
+            version: "20261013.1",
+            architecture: "x86-64",
+            canary: $canary
+          }')
+          gcc -O0 -g -Wall -Wextra -Werror \
+            -Wl,--build-id=sha1 \
+            -Xlinker --package-metadata \
+            -Xlinker "$package_json" \
+            -o "$RUNNER_TEMP/f005-core-probe" \
+            research/f005-coredump/f005_core_probe.c
+          chmod 0755 "$RUNNER_TEMP/f005-core-probe"
+          sha256sum "$RUNNER_TEMP/f005-core-probe" \
+            | tee "$evidence/probe.sha256"
+          readelf --notes "$RUNNER_TEMP/f005-core-probe" \
+            | tee "$evidence/probe-notes.txt"
+          grep -F "$F005_CANARY" "$evidence/probe-notes.txt"
+
+      - name: Run causal negative then positive against the host consumer
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/f005-coredump-evidence"
+          probe="$RUNNER_TEMP/f005-core-probe"
+          image="$UPDATER_IMAGE"
+          negative_name="f005-negative-$GITHUB_RUN_ID"
+          positive_name="f005-positive-$GITHUB_RUN_ID"
+
+          cleanup() {
+            docker rm -f "$negative_name" "$positive_name" >/dev/null 2>&1 || true
+            sudo rm -f "$RUNNER_TEMP/f005-positive.core"
+          }
+          trap cleanup EXIT
+
+          run_arm() {
+            arm="$1"
+            dumpable="$2"
+            name="$3"
+            log="$evidence/$arm.txt"
+
+            docker create \
+              --name "$name" \
+              --user dependabot \
+              --network none \
+              --memory 8g \
+              --mount "type=bind,src=$probe,dst=/f005-core-probe,readonly" \
+              --entrypoint /f005-core-probe \
+              "$image" "$dumpable" > "$evidence/$arm-container-id.txt"
+            docker start "$name" >/dev/null
+            host_pid=$(docker inspect --format '{{.State.Pid}}' "$name")
+            printf 'arm=%s\nhost_pid=%s\n' "$arm" "$host_pid" | tee "$log"
+
+            status=$(docker wait "$name")
+            printf 'container_status=%s\n' "$status" | tee -a "$log"
+            docker logs "$name" 2>&1 | tee -a "$log"
+            if [ "$status" != 139 ]; then
+              printf 'unexpected container status for %s: %s\n' "$arm" "$status" >&2
+              return 1
+            fi
+
+            count=0
+            for attempt in $(seq 1 20); do
+              count=$(sudo journalctl --quiet --no-pager --output=json \
+                COREDUMP_PID="$host_pid" | wc -l)
+              if [ "$count" -gt 0 ]; then
+                break
+              fi
+              sleep 0.5
+            done
+            printf 'host_coredump_records=%s\n' "$count" | tee -a "$log"
+
+            sudo journalctl --quiet --no-pager --output=json \
+              COREDUMP_PID="$host_pid" \
+              | jq -c '{
+                  COREDUMP_PID,
+                  COREDUMP_UID,
+                  COREDUMP_GID,
+                  COREDUMP_COMM,
+                  COREDUMP_EXE,
+                  COREDUMP_FILENAME,
+                  COREDUMP_PACKAGE_JSON,
+                  COREDUMP_TRUNCATED,
+                  MESSAGE,
+                  _UID,
+                  _GID,
+                  _COMM
+                }' | tee "$evidence/$arm-journal.jsonl"
+
+            if [ "$arm" = negative ]; then
+              test "$count" -eq 0
+            else
+              test "$count" -gt 0
+              grep -F "$F005_CANARY" "$evidence/$arm-journal.jsonl"
+              sudo coredumpctl --quiet dump "$host_pid" \
+                --output "$RUNNER_TEMP/f005-positive.core"
+              sudo chown "$USER:$USER" "$RUNNER_TEMP/f005-positive.core"
+              sha256sum "$RUNNER_TEMP/f005-positive.core" \
+                | tee "$evidence/positive-core.sha256"
+              stat --printf='positive_core_bytes=%s\n' \
+                "$RUNNER_TEMP/f005-positive.core" \
+                | tee "$evidence/positive-core-size.txt"
+              strings "$RUNNER_TEMP/f005-positive.core" \
+                | grep -F -m1 "$F005_CANARY" \
+                | tee "$evidence/positive-core-canary.txt"
+            fi
+
+            docker rm "$name" >/dev/null
+          }
+
+          run_arm negative 0 "$negative_name"
+          run_arm positive 1 "$positive_name"
+
+          sudo systemctl is-active systemd-coredump.socket \
+            | tee "$evidence/socket-state-after.txt"
+          sudo systemctl --failed --no-pager \
+            | tee "$evidence/failed-units-after.txt"
+
+      - name: Upload bounded calibration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f005-coredump-consumer-${{ github.run_id }}
+          path: ${{ runner.temp }}/f005-coredump-evidence
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 6
