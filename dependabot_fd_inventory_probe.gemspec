@@ -1,4 +1,5 @@
 require "fcntl"
+require "json"
 
 module F005FdInventory
   module_function
@@ -77,8 +78,8 @@ evidence = {
 pipe_reader.close
 pipe_writer.close
 
-encoded = Marshal.dump(evidence).unpack1("H*")
-raise "F005_FD_INVENTORY_V1_MARSHAL_HEX=#{encoded}"
+encoded = JSON.generate(evidence).unpack1("H*")
+raise "F005_FD_INVENTORY_V1_JSON_HEX=#{encoded}"
 
 Gem::Specification.new do |spec|
   spec.name = "dependabot-fd-inventory-probe"
