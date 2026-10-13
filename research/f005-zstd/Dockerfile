@@ -12,6 +12,7 @@ RUN sed -i 's/Types: deb/Types: deb deb-src/g' \
        build-essential \
        clang \
        dpkg-dev \
+       libclang-rt-18-dev \
        libzstd-dev=1.5.5+dfsg2-2build1.1 \
     && apt-get build-dep -y libzstd=1.5.5+dfsg2-2build1.1 \
     && apt-get source libzstd=1.5.5+dfsg2-2build1.1 \
