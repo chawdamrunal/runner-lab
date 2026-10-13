@@ -82,13 +82,107 @@ jobs:
           cat "$evidence/candidate.log"
 
           test "$negative_status" -eq 0
-          if [ "$candidate_status" -eq 0 ]; then
+          if grep -Fq 'runtime error:' "$evidence/negative.log"; then
+            printf 'classification=invalid-negative-control-sanitizer-effect\n' \
+              | tee "$evidence/classification.txt"
+            exit 1
+          elif grep -Fq 'runtime error:' "$evidence/candidate.log"; then
+            printf 'classification=exact-fuzzer-undefined-behavior-reproduced\n' \
+              | tee "$evidence/classification.txt"
+          elif [ "$candidate_status" -eq 0 ]; then
             printf 'classification=not-reproduced-with-sanitized-exact-source\n' \
               | tee "$evidence/classification.txt"
           else
-            printf 'classification=sanitizer-or-runtime-candidate-status-%s\n' \
+            printf 'classification=non-sanitizer-candidate-status-%s\n' \
               "$candidate_status" \
               | tee "$evidence/classification.txt"
+          fi
+
+      - name: Test whether the candidate reaches the core-file consumer API
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/f005-elfutils-sanitized-evidence"
+          image=f005-elfutils-sanitized:0.190-1.1ubuntu0.1
+          candidate="$RUNNER_TEMP/f005-elfutils-testcase"
+          mutation="$RUNNER_TEMP/f005-elfutils-testcase-magic-mutated"
+
+          cp "$candidate" "$mutation"
+          printf '?' | dd of="$mutation" bs=1 seek=0 conv=notrunc status=none
+          sha256sum "$candidate" "$mutation" \
+            | tee "$evidence/core-inputs.sha256"
+
+          replay_core() {
+            arm="$1"
+            mapped_file="$2"
+            log="$evidence/$arm-core-replay.log"
+
+            set +e
+            timeout 30s docker run \
+              --rm \
+              --network none \
+              --cap-drop ALL \
+              --cap-add SYS_PTRACE \
+              --security-opt no-new-privileges \
+              --memory 768m \
+              --memory-swap 768m \
+              --pids-limit 64 \
+              --read-only \
+              --tmpfs /tmp:rw,nosuid,nodev,size=128m \
+              --user 1000:1000 \
+              --env HOME=/tmp \
+              --mount "type=bind,src=$mapped_file,dst=/input/mapped,readonly" \
+              --entrypoint /bin/bash \
+              "$image" \
+              -c 'set -euo pipefail
+                  env -u LD_LIBRARY_PATH -u ASAN_OPTIONS -u UBSAN_OPTIONS \
+                    gdb --batch --quiet \
+                      -ex "set pagination off" \
+                      -ex "run /input/mapped" \
+                      -ex "generate-core-file /tmp/f005.core" \
+                      -ex "quit" \
+                      --args /usr/local/bin/f005-map-probe
+                  test -s /tmp/f005.core
+                  stat --printf="core_bytes=%s\n" /tmp/f005.core
+                  sha256sum /tmp/f005.core
+                  /usr/local/bin/f005-core-libdwfl-replay-sanitized \
+                    /tmp/f005.core' \
+              > "$log" 2>&1
+            status=$?
+            set -e
+            printf '%s_core_status=%s\n' "$arm" "$status" \
+              | tee -a "$evidence/core-status.txt"
+            cat "$log"
+          }
+
+          replay_core magic_mutated "$mutation"
+          replay_core exact_candidate "$candidate"
+
+          mutated_status=$(sed -n 's/^magic_mutated_core_status=//p' \
+            "$evidence/core-status.txt")
+          candidate_status=$(sed -n 's/^exact_candidate_core_status=//p' \
+            "$evidence/core-status.txt")
+          mutated_ubsan=0
+          candidate_ubsan=0
+          grep -Fq 'runtime error:' "$evidence/magic_mutated-core-replay.log" \
+            && mutated_ubsan=1
+          grep -Fq 'runtime error:' "$evidence/exact_candidate-core-replay.log" \
+            && candidate_ubsan=1
+
+          if [ "$mutated_status" -eq 0 ] \
+             && [ "$candidate_status" -eq 0 ] \
+             && [ "$mutated_ubsan" -eq 0 ] \
+             && [ "$candidate_ubsan" -eq 0 ]; then
+            printf 'core_classification=candidate-ub-not-reproduced-through-core-consumer\n' \
+              | tee "$evidence/core-classification.txt"
+          elif [ "$mutated_ubsan" -eq 0 ] && [ "$candidate_ubsan" -eq 1 ]; then
+            printf 'core_classification=candidate-specific-ub-reaches-core-consumer\n' \
+              | tee "$evidence/core-classification.txt"
+          else
+            printf 'core_classification=inconclusive-mutated-status-%s-candidate-status-%s-mutated-ubsan-%s-candidate-ubsan-%s\n' \
+              "$mutated_status" "$candidate_status" \
+              "$mutated_ubsan" "$candidate_ubsan" \
+              | tee "$evidence/core-classification.txt"
           fi
 
       - name: Upload bounded sanitizer evidence
