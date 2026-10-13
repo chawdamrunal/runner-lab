@@ -1,0 +1,108 @@
+name: f005-updater-helper-inventory
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  exact-updater-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the owned inventory harness
+        uses: actions/checkout@v4
+
+      - name: Pull and bind the exact updater image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image='ghcr.io/dependabot/dependabot-updater-bundler:v2.0.20261007230529@sha256:0c3e2ed47adc7b21b82ac89c11a8768ae69c839c01f99b609f187fddd3431f89'
+          evidence="$RUNNER_TEMP/f005-updater-helper-inventory"
+          mkdir -p "$evidence"
+          docker pull "$image"
+          docker image inspect "$image" > "$evidence/image-inspect.json"
+          docker image inspect "$image" \
+            --format 'repo_digests={{json .RepoDigests}} image_id={{.Id}}' \
+            | tee "$evidence/image-binding.txt"
+
+      - name: Inventory privilege-transition files without executing them
+        shell: bash
+        run: |
+          set -euo pipefail
+          image='ghcr.io/dependabot/dependabot-updater-bundler:v2.0.20261007230529@sha256:0c3e2ed47adc7b21b82ac89c11a8768ae69c839c01f99b609f187fddd3431f89'
+          evidence="$RUNNER_TEMP/f005-updater-helper-inventory"
+          common=(
+            --rm
+            --network none
+            --cap-drop ALL
+            --security-opt no-new-privileges
+            --read-only
+            --tmpfs /tmp:rw,nosuid,nodev,size=64m
+            --pids-limit 64
+            --memory 512m
+            --memory-swap 512m
+            --mount "type=bind,src=$evidence,dst=/evidence"
+          )
+
+          docker run "${common[@]}" --user root --entrypoint /bin/bash \
+            "$image" -c '
+              set -euo pipefail
+              : > /evidence/suid-sgid.txt
+              while IFS= read -r path; do
+                stat --printf="mode=%a uid=%u gid=%g size=%s path=%n\n" "$path"
+                sha256sum "$path"
+                dpkg-query -S "$path" 2>/dev/null || true
+                printf "\n"
+              done < <(find / -xdev -type f \( -perm -4000 -o -perm -2000 \) -print 2>/dev/null | sort) \
+                > /evidence/suid-sgid.txt
+
+              if command -v getcap >/dev/null 2>&1; then
+                getcap -r / 2>/dev/null | sort > /evidence/file-capabilities.txt
+              else
+                printf "getcap_unavailable=true\n" > /evidence/file-capabilities.txt
+              fi
+
+              find / -xdev -type f \( -perm -0002 -o -perm -0020 \) \
+                -printf "mode=%m uid=%u gid=%g path=%p\n" 2>/dev/null \
+                | sort > /evidence/group-world-writable-files.txt
+              find / -xdev -type d \( -perm -0002 -o -perm -0020 \) \
+                -printf "mode=%m uid=%u gid=%g path=%p\n" 2>/dev/null \
+                | sort > /evidence/group-world-writable-dirs.txt
+              cat /etc/os-release > /evidence/os-release.txt
+              dpkg-query -W -f="\${binary:Package}\\t\${Version}\\n" \
+                | sort > /evidence/packages.txt
+            '
+
+          docker run "${common[@]}" --user dependabot --entrypoint /bin/bash \
+            "$image" -c '
+              set -euo pipefail
+              id
+              printf "path=%s\n" "$PATH"
+              IFS=: read -ra paths <<<"$PATH"
+              for path in "${paths[@]}"; do
+                if [ -e "$path" ]; then
+                  stat --printf="mode=%a uid=%u gid=%g writable=%A path=%n\n" "$path"
+                  if [ -w "$path" ]; then printf "dependabot_writable=true path=%s\n" "$path"; fi
+                fi
+              done
+            ' > "$evidence/dependabot-path.txt"
+
+          suid_count=$(grep -c '^mode=' "$evidence/suid-sgid.txt" || true)
+          filecap_count=$(grep -c ' = ' "$evidence/file-capabilities.txt" || true)
+          writable_path_count=$(grep -c '^dependabot_writable=true' "$evidence/dependabot-path.txt" || true)
+          printf 'suid_sgid_count=%s\nfilecap_count=%s\nwritable_path_count=%s\n' \
+            "$suid_count" "$filecap_count" "$writable_path_count" \
+            | tee "$evidence/status.txt"
+
+      - name: Upload exact helper inventory
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f005-updater-helper-inventory-${{ github.run_id }}
+          path: ${{ runner.temp }}/f005-updater-helper-inventory
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 6
