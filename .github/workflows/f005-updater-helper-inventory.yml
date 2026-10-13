@@ -22,6 +22,7 @@ jobs:
           image='ghcr.io/dependabot/dependabot-updater-bundler:v2.0.20261007230529@sha256:0c3e2ed47adc7b21b82ac89c11a8768ae69c839c01f99b609f187fddd3431f89'
           evidence="$RUNNER_TEMP/f005-updater-helper-inventory"
           mkdir -p "$evidence"
+          chmod 0777 "$evidence"
           docker pull "$image"
           docker image inspect "$image" > "$evidence/image-inspect.json"
           docker image inspect "$image" \
