@@ -35,7 +35,7 @@ RUN gcc -O1 -g -Wall -Wextra -Werror \
       /src/f005_libdwfl_replay.c \
       -ldw -lelf
 
-ENV LD_LIBRARY_PATH="/build/elfutils-0.190/libdw/.libs:/build/elfutils-0.190/libelf/.libs"
+ENV LD_LIBRARY_PATH="/build/elfutils-0.190/libdw:/build/elfutils-0.190/libelf"
 ENV ASAN_OPTIONS="abort_on_error=1:disable_coredump=1:detect_leaks=0"
 ENV UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1"
 

@@ -40,7 +40,7 @@ jobs:
           docker run --rm \
             --entrypoint /bin/bash \
             f005-elfutils-sanitized:0.190-1.1ubuntu0.1 \
-            -c 'cat /usr/local/share/f005-elfutils-source-version.txt; ldd /usr/local/bin/f005-libdwfl-replay-sanitized' \
+            -c 'set -euo pipefail; cat /usr/local/share/f005-elfutils-source-version.txt; binding=$(ldd /usr/local/bin/f005-libdwfl-replay-sanitized); printf "%s\n" "$binding"; grep -F "/build/elfutils-0.190/libdw/libdw.so.1" <<<"$binding"; grep -F "/build/elfutils-0.190/libelf/libelf.so.1" <<<"$binding"' \
             | tee "$evidence/build-binding.txt"
 
       - name: Replay controls under ASan and UBSan
