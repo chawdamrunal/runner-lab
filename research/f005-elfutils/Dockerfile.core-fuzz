@@ -1,0 +1,45 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+WORKDIR /build
+
+RUN sed -i 's/Types: deb/Types: deb deb-src/g' \
+      /etc/apt/sources.list.d/ubuntu.sources \
+    && grep '^Types: deb deb-src$' /etc/apt/sources.list.d/ubuntu.sources \
+    && apt-get update \
+    && apt-get install --no-install-recommends -y \
+       build-essential \
+       clang \
+       dpkg-dev \
+       libclang-rt-18-dev \
+       libdw-dev=0.190-1.1ubuntu0.1 \
+       libelf-dev=0.190-1.1ubuntu0.1 \
+    && apt-get build-dep -y elfutils=0.190-1.1ubuntu0.1 \
+    && apt-get source elfutils=0.190-1.1ubuntu0.1 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN cd /build/elfutils-0.190 \
+    && CC=clang \
+       CFLAGS='-O1 -g -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -D_FORTIFY_SOURCE=0' \
+       LDFLAGS='-fsanitize=fuzzer-no-link,address,undefined' \
+       ./configure --disable-debuginfod --disable-libdebuginfod \
+    && make -j2 \
+    && dpkg-parsechangelog -S Version \
+       > /usr/local/share/f005-elfutils-source-version.txt
+
+COPY f005_core_native_fuzz.c /src/f005_core_native_fuzz.c
+
+RUN clang -O1 -g -Wall -Wextra -Werror \
+      -fsanitize=fuzzer,address,undefined \
+      -fno-sanitize-recover=all \
+      -fno-omit-frame-pointer \
+      -o /usr/local/bin/f005-core-native-fuzz \
+      /src/f005_core_native_fuzz.c \
+      -ldw -lelf
+
+ENV LD_LIBRARY_PATH="/build/elfutils-0.190/libdw:/build/elfutils-0.190/libelf"
+ENV ASAN_OPTIONS="abort_on_error=1:disable_coredump=1:detect_leaks=0"
+ENV UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1"
+
+ENTRYPOINT ["/usr/local/bin/f005-core-native-fuzz"]

@@ -1,0 +1,139 @@
+name: f005-core-native-fuzz
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  exact-core-consumer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the owned core harness
+        uses: actions/checkout@v4
+
+      - name: Download the controlled kernel-shaped core seed
+        uses: actions/download-artifact@v4
+        with:
+          name: f005-coredump-consumer-38380061952
+          path: ${{ runner.temp }}/f005-core-seed-artifact
+          github-token: ${{ github.token }}
+          run-id: 38380061952
+
+      - name: Build exact core consumer and bind the seed
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/f005-core-native-fuzz-evidence"
+          seed_artifact="$RUNNER_TEMP/f005-core-seed-artifact"
+          seed="$seed_artifact/positive.core"
+          mkdir -p "$evidence"
+          printf '%s  %s\n' \
+            0082ede85ec1a53eb6934800270bc40610d372d5d0378773b3a0df10b2ec05f1 \
+            "$seed" | sha256sum --check
+          sha256sum "$seed" | tee "$evidence/seed.sha256"
+          stat --printf='seed_bytes=%s\n' "$seed" \
+            | tee "$evidence/seed-size.txt"
+
+          docker build \
+            --file research/f005-elfutils/Dockerfile.core-fuzz \
+            --tag f005-core-native-fuzz:0.190-1.1ubuntu0.1 \
+            research/f005-elfutils
+          docker run --rm \
+            --entrypoint /bin/bash \
+            f005-core-native-fuzz:0.190-1.1ubuntu0.1 \
+            -c 'set -euo pipefail; cat /usr/local/share/f005-elfutils-source-version.txt; binding=$(ldd /usr/local/bin/f005-core-native-fuzz); printf "%s\n" "$binding"; grep -F "/build/elfutils-0.190/libdw/libdw.so.1" <<<"$binding"; grep -F "/build/elfutils-0.190/libelf/libelf.so.1" <<<"$binding"' \
+            | tee "$evidence/build-binding.txt"
+
+      - name: Run positive core control and bounded core-native fuzzing
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/f005-core-native-fuzz-evidence"
+          seed_artifact="$RUNNER_TEMP/f005-core-seed-artifact"
+          seed="$seed_artifact/positive.core"
+          image=f005-core-native-fuzz:0.190-1.1ubuntu0.1
+          common=(
+            --rm
+            --network none
+            --cap-drop ALL
+            --security-opt no-new-privileges
+            --memory 768m
+            --memory-swap 768m
+            --pids-limit 32
+            --read-only
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m
+            --user "$(id -u):$(id -g)"
+            --mount "type=bind,src=$seed,dst=/seed/positive.core,readonly"
+            --mount "type=bind,src=$evidence,dst=/evidence"
+          )
+
+          docker run "${common[@]}" \
+            --entrypoint /bin/bash \
+            "$image" \
+            -c 'set -euo pipefail
+                mkdir /tmp/control
+                cp /seed/positive.core /tmp/control/
+                /usr/local/bin/f005-core-native-fuzz \
+                  -runs=20 -max_len=262144 /tmp/control' \
+            > "$evidence/control.log" 2>&1
+          coverage_counters=$(sed -n \
+            's/.*counters): \([0-9][0-9]*\) .*/\1/p' \
+            "$evidence/control.log" | head -n1)
+          test -n "$coverage_counters"
+          test "$coverage_counters" -ge 1000
+          printf 'inline_coverage_counters=%s\n' "$coverage_counters" \
+            | tee "$evidence/coverage-binding.txt"
+
+          set +e
+          timeout 90s docker run "${common[@]}" \
+            --entrypoint /bin/bash \
+            "$image" \
+            -c 'set -euo pipefail
+                mkdir /tmp/corpus
+                cp /seed/positive.core /tmp/corpus/
+                /usr/local/bin/f005-core-native-fuzz \
+                  -max_total_time=60 \
+                  -timeout=5 \
+                  -rss_limit_mb=512 \
+                  -max_len=262144 \
+                  -artifact_prefix=/evidence/crash- \
+                  /tmp/corpus' \
+            > "$evidence/fuzz.log" 2>&1
+          fuzz_status=$?
+          set -e
+
+          printf 'control_status=0\nfuzz_status=%s\n' "$fuzz_status" \
+            | tee "$evidence/status.txt"
+          tail -n 100 "$evidence/control.log"
+          tail -n 200 "$evidence/fuzz.log"
+
+          if find "$evidence" -maxdepth 1 -type f -name 'crash-*' \
+               | grep -q .; then
+            printf 'classification=core-native-candidate-produced\n' \
+              | tee "$evidence/classification.txt"
+          elif grep -Eq 'AddressSanitizer|runtime error:|ERROR: libFuzzer' \
+                 "$evidence/fuzz.log"; then
+            printf 'classification=sanitizer-effect-without-artifact\n' \
+              | tee "$evidence/classification.txt"
+          elif [ "$fuzz_status" -eq 0 ]; then
+            printf 'classification=no-candidate-in-bounded-core-campaign\n' \
+              | tee "$evidence/classification.txt"
+          else
+            printf 'classification=inconclusive-fuzz-status-%s\n' \
+              "$fuzz_status" \
+              | tee "$evidence/classification.txt"
+          fi
+
+      - name: Upload bounded core-parser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f005-core-native-fuzz-${{ github.run_id }}
+          path: ${{ runner.temp }}/f005-core-native-fuzz-evidence
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 6
