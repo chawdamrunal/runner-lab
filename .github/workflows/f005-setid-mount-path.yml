@@ -35,12 +35,39 @@ jobs:
             --memory-swap 512m \
             --mount "type=bind,src=$evidence,dst=/evidence" \
             --mount "type=bind,src=$GITHUB_WORKSPACE/research/f005-helper-inventory/f005_mount_helper_canary.c,dst=/probe.c,readonly" \
+            --user root \
+            --entrypoint /bin/bash \
+            "$image" -c '
+              set -euo pipefail
+              cc -O2 -Wall -Wextra -Werror -o /tmp/f005-owned-setuid-positive /probe.c
+              chown root:root /tmp/f005-owned-setuid-positive
+              chmod 4755 /tmp/f005-owned-setuid-positive
+              stat --printf="mode=%a uid=%u gid=%g path=%n\n" /tmp/f005-owned-setuid-positive \
+                > /evidence/owned-setuid-binary.txt
+              set +e
+              setpriv --reuid=1000 --regid=1000 --clear-groups \
+                /tmp/f005-owned-setuid-positive --owned-setuid-positive \
+                > /evidence/owned-setuid.stdout.txt 2> /evidence/owned-setuid.stderr.txt
+              owned_setuid_status=$?
+              set -e
+              printf "owned_setuid_status=%s\n" "$owned_setuid_status" \
+                > /evidence/owned-setuid-status.txt
+            '
+
+          docker run --rm \
+            --network none \
+            --pids-limit 64 \
+            --memory 512m \
+            --memory-swap 512m \
+            --mount "type=bind,src=$evidence,dst=/evidence" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/research/f005-helper-inventory/f005_mount_helper_canary.c,dst=/probe.c,readonly" \
             --user dependabot \
             --entrypoint /bin/bash \
             "$image" -c '
               set -euo pipefail
               grep -E "^(Uid|Gid|CapInh|CapPrm|CapEff|CapBnd|CapAmb|NoNewPrivs|Seccomp):" \
                 /proc/self/status > /evidence/actor-status.txt
+              findmnt -no TARGET,VFS-OPTIONS,FS-OPTIONS / > /evidence/root-mount-options.txt
               stat --printf="mode=%a uid=%u gid=%g path=%n\n" /usr/bin/mount \
                 > /evidence/installed-mount.txt
 
