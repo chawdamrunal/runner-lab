@@ -174,13 +174,14 @@ static void probe_process_primitives(void)
     child = fork();
     if (child == 0) {
         int result[2];
+        ssize_t written;
         close(pipe_fds[0]);
         errno = 0;
         result[0] = (int)setsid();
         result[1] = errno;
-        (void)write(pipe_fds[1], result, sizeof(result));
+        written = write(pipe_fds[1], result, sizeof(result));
         close(pipe_fds[1]);
-        _exit(0);
+        _exit(written == (ssize_t)sizeof(result) ? 0 : 1);
     }
 
     if (child < 0) {
