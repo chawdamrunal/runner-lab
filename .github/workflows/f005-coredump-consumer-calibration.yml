@@ -148,6 +148,8 @@ jobs:
               sudo coredumpctl --quiet dump "$host_pid" \
                 --output "$RUNNER_TEMP/f005-positive.core"
               sudo chown "$USER:$USER" "$RUNNER_TEMP/f005-positive.core"
+              cp "$RUNNER_TEMP/f005-positive.core" \
+                "$evidence/positive.core"
               sha256sum "$RUNNER_TEMP/f005-positive.core" \
                 | tee "$evidence/positive-core.sha256"
               stat --printf='positive_core_bytes=%s\n' \
