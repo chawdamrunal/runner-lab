@@ -1,0 +1,140 @@
+name: f005-ktls-offline-build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compile-only:
+    name: compile-${{ matrix.arm }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        arm:
+          - a-vulnerable
+          - b-patched
+    steps:
+      - name: Check out the owned offline build harness
+        uses: actions/checkout@v4
+
+      - name: Install exact-kernel build prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            bc bison build-essential cpio dwarves flex gcc-13 \
+            libelf-dev libssl-dev patch rsync zstd
+
+      - name: Verify source inputs and prepare the causal arm
+        shell: bash
+        env:
+          ARM_NAME: ${{ matrix.arm }}
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/f005-ktls-$ARM_NAME"
+          source_dir="$root/linux-6.17"
+          mkdir -p "$root/download" "$root/build-artifact"
+
+          curl --fail --location --silent --show-error \
+            --output "$root/download/linux.tar.gz" \
+            'https://archive.ubuntu.com/ubuntu/pool/main/l/linux-azure-6.17/linux-azure-6.17_6.17.0.orig.tar.gz'
+          curl --fail --location --silent --show-error \
+            --output "$root/download/ubuntu.diff.gz" \
+            'https://archive.ubuntu.com/ubuntu/pool/main/l/linux-azure-6.17/linux-azure-6.17_6.17.0-1022.22.diff.gz'
+          curl --fail --location --silent --show-error \
+            --output "$root/download/buildinfo.deb" \
+            'https://archive.ubuntu.com/ubuntu/pool/main/l/linux-azure-6.17/linux-buildinfo-6.17.0-1022-azure_6.17.0-1022.22_amd64.deb'
+          curl --fail --location --silent --show-error \
+            --output "$root/download/regression.patch" \
+            'https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/patch/?id=3834e079d67feda5fd57d1ea8d4185d316997335'
+
+          printf '%s  %s\n' \
+            'a5623ec5af79da8807e1467e43a1888461c7a445fb1e17533fe45f0fdf4394e3' \
+            "$root/download/linux.tar.gz" \
+            'cb0154101fc7e337228a00c1caae7760b88afcb033f75c01756b3669dd376c54' \
+            "$root/download/ubuntu.diff.gz" \
+            'e6f5c92a8cafa00ea93b573b77591c76c8ec1603c308b301d3d03e89cc57c5b3' \
+            "$root/download/buildinfo.deb" \
+            'e8dac20a46d9ed083efa9d9c6ebaa5e587eef97a62276a98c15eb76ce4b1f3e0' \
+            "$root/download/regression.patch" \
+            | sha256sum --check --strict
+
+          tar -xzf "$root/download/linux.tar.gz" -C "$root"
+          gzip -dc "$root/download/ubuntu.diff.gz" \
+            | patch --batch --forward -p1 -d "$source_dir"
+          dpkg-deb --extract "$root/download/buildinfo.deb" \
+            "$root/buildinfo"
+          cp "$root/buildinfo/usr/lib/linux/6.17.0-1022-azure/config" \
+            "$source_dir/.config"
+          printf '%s  %s\n' \
+            'b684cdecf90ab6fb67f49c2b63ee95738810ee5c92476fa6f801815f75051ab5' \
+            "$source_dir/.config" \
+            '887497624216b39af78fba204e4fa1dea3fad25a3ce1015e1f41653f7c8a0cff' \
+            "$GITHUB_WORKSPACE/research/f005-ktls-offline/causal-one-hunk.patch" \
+            | sha256sum --check --strict
+
+          patch --batch --forward -p1 -d "$source_dir" \
+            < "$root/download/regression.patch"
+          if [ "$ARM_NAME" = b-patched ]; then
+            patch --batch --forward -p1 -d "$source_dir" \
+              < "$GITHUB_WORKSPACE/research/f005-ktls-offline/causal-one-hunk.patch"
+          fi
+
+          cp "$source_dir/net/tls/tls_sw.c" \
+            "$root/build-artifact/tls_sw.c"
+          cp "$source_dir/tools/testing/selftests/net/tls.c" \
+            "$root/build-artifact/tls-selftest.c"
+          cp "$source_dir/.config" "$root/build-artifact/config.input"
+          cp "$GITHUB_WORKSPACE/research/f005-ktls-offline/causal-one-hunk.patch" \
+            "$root/build-artifact/causal-one-hunk.patch"
+          sha256sum \
+            "$root/build-artifact/tls_sw.c" \
+            "$root/build-artifact/tls-selftest.c" \
+            "$root/build-artifact/config.input" \
+            "$root/build-artifact/causal-one-hunk.patch" \
+            > "$root/build-artifact/source-sha256.txt"
+
+      - name: Compile the exact x86 kernel and regression binary without booting
+        shell: bash
+        env:
+          ARM_NAME: ${{ matrix.arm }}
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/f005-ktls-$ARM_NAME"
+          source_dir="$root/linux-6.17"
+          output="$root/build-artifact"
+
+          make -C "$source_dir" CC=gcc-13 olddefconfig
+          make -C "$source_dir" CC=gcc-13 -j2 bzImage
+          make -C "$source_dir" CC=gcc-13 -j2 M=net/tls modules
+          make -C "$source_dir" CC=gcc-13 headers
+          make -C "$source_dir/tools/testing/selftests/net" \
+            CC=gcc-13 LDFLAGS=-static tls
+
+          cp "$source_dir/arch/x86/boot/bzImage" "$output/bzImage"
+          cp "$source_dir/net/tls/tls.ko" "$output/tls.ko"
+          cp "$source_dir/tools/testing/selftests/net/tls" \
+            "$output/tls-selftest"
+          cp "$source_dir/.config" "$output/config.effective"
+          cp "$source_dir/System.map" "$output/System.map"
+          file "$output/bzImage" "$output/tls.ko" \
+            "$output/tls-selftest" > "$output/file-types.txt"
+          sha256sum \
+            "$output/bzImage" "$output/tls.ko" \
+            "$output/tls-selftest" "$output/config.effective" \
+            "$output/System.map" > "$output/build-sha256.txt"
+
+      - name: Upload compile-only exact-kernel artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f005-ktls-${{ matrix.arm }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/f005-ktls-${{ matrix.arm }}/build-artifact
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 6
