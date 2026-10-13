@@ -21,10 +21,12 @@ RUN sed -i 's/Types: deb/Types: deb deb-src/g' \
 
 RUN cd /build/elfutils-0.190 \
     && CC=clang \
+       CXX=clang++ \
        CFLAGS='-O1 -g' \
        ./configure --disable-debuginfod --disable-libdebuginfod \
     && make -j2 \
        CC=clang \
+       CXX=clang++ \
        CFLAGS='-O1 -g -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -D_FORTIFY_SOURCE=0' \
        LDFLAGS='-fsanitize=fuzzer-no-link,address,undefined' \
        dso_LDFLAGS='-shared' \
