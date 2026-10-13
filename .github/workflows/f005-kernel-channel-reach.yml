@@ -1,0 +1,79 @@
+name: f005-kernel-channel-reach
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  exact-updater-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the owned channel harness
+        uses: actions/checkout@v4
+
+      - name: Test keyring, TCP Fast Open, and process prerequisite reach
+        shell: bash
+        run: |
+          set -euo pipefail
+          image='ghcr.io/dependabot/dependabot-updater-bundler:v2.0.20261007230529@sha256:0c3e2ed47adc7b21b82ac89c11a8768ae69c839c01f99b609f187fddd3431f89'
+          evidence="$RUNNER_TEMP/f005-kernel-channel-reach"
+          mkdir -p "$evidence/default-seccomp" "$evidence/unconfined-seccomp"
+          chmod -R 0777 "$evidence"
+
+          docker pull "$image"
+          docker image inspect "$image" \
+            --format 'repo_digests={{json .RepoDigests}} image_id={{.Id}}' \
+            > "$evidence/image-binding.txt"
+          uname -a > "$evidence/host-uname.txt"
+
+          common=(
+            --rm
+            --network none
+            --pids-limit 64
+            --memory 512m
+            --memory-swap 512m
+            --mount "type=bind,src=$GITHUB_WORKSPACE/research/f005-kernel-reach/f005_kernel_channel_reach.c,dst=/probe.c,readonly"
+            --user dependabot
+            --entrypoint /bin/bash
+          )
+
+          for mode in default-seccomp unconfined-seccomp; do
+            security=()
+            if [ "$mode" = unconfined-seccomp ]; then
+              security=(--security-opt seccomp=unconfined)
+            fi
+            docker run "${common[@]}" "${security[@]}" \
+              --mount "type=bind,src=$evidence/$mode,dst=/evidence" \
+              "$image" -c '
+                set -euo pipefail
+                grep -E "^(Uid|Gid|CapInh|CapPrm|CapEff|CapBnd|CapAmb|NoNewPrivs|Seccomp):" \
+                  /proc/self/status > /evidence/actor-status.txt
+                for key in tcp_fastopen perf_event_paranoid unprivileged_bpf_disabled unprivileged_userns_clone; do
+                  path="/proc/sys/net/ipv4/$key"
+                  if [ ! -e "$path" ]; then path="/proc/sys/kernel/$key"; fi
+                  if [ -r "$path" ]; then
+                    printf "%s=" "$key"
+                    tr -d "\n" < "$path"
+                    printf "\n"
+                  else
+                    printf "%s=unreadable\n" "$key"
+                  fi
+                done > /evidence/kernel-policy.txt
+                cc -O2 -Wall -Wextra -Werror -o /tmp/f005-kernel-channel-reach /probe.c
+                /tmp/f005-kernel-channel-reach > /evidence/result.txt
+              '
+          done
+
+      - name: Upload kernel channel reachability evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f005-kernel-channel-reach-${{ github.run_id }}
+          path: ${{ runner.temp }}/f005-kernel-channel-reach
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 6
