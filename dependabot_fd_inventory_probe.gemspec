@@ -16,8 +16,12 @@ module F005FdInventory
     "ERROR:#{error.class}"
   end
 
-  def descriptor_ids
-    Dir.children("/proc/self/fd").grep(/\A\d+\z/).map(&:to_i).sort.first(64)
+  def descriptor_inventory
+    Dir.open("/proc/self/fd") do |directory|
+      directory_fd = directory.fileno
+      ids = directory.each_child.grep(/\A\d+\z/).map(&:to_i).sort.first(64)
+      ids.reject { |fd| fd == directory_fd }.map { |fd| descriptor(fd) }
+    end
   rescue StandardError
     []
   end
@@ -51,10 +55,16 @@ module F005FdInventory
   end
 end
 
-baseline_ids = F005FdInventory.descriptor_ids
+baseline_descriptors = F005FdInventory.descriptor_inventory
+baseline_ids = baseline_descriptors.filter_map do |descriptor|
+  descriptor["fd"] unless descriptor.key?("error")
+end
 pipe_reader, pipe_writer = IO.pipe
 positive_ids = [pipe_reader.fileno, pipe_writer.fileno]
-all_ids = (baseline_ids + positive_ids).uniq.sort
+after_pipe_descriptors = F005FdInventory.descriptor_inventory
+after_pipe_ids = after_pipe_descriptors.filter_map do |descriptor|
+  descriptor["fd"] unless descriptor.key?("error")
+end
 
 evidence = {
   "schema" => "F005_FD_INVENTORY_V1",
@@ -70,8 +80,9 @@ evidence = {
   "baseline_ids" => baseline_ids,
   "nonstdio_baseline_ids" => baseline_ids.reject { |fd| fd <= 2 },
   "positive_control_pipe_ids" => positive_ids,
-  "positive_control_visible" => positive_ids.all? { |fd| all_ids.include?(fd) },
-  "descriptors" => all_ids.map { |fd| F005FdInventory.descriptor(fd) },
+  "positive_control_visible" => positive_ids.all? { |fd| after_pipe_ids.include?(fd) },
+  "baseline_descriptors" => baseline_descriptors,
+  "after_pipe_descriptors" => after_pipe_descriptors,
   "socket_tables" => F005FdInventory.socket_tables
 }
 
