@@ -70,6 +70,13 @@ jobs:
                 /usr/local/bin/f005-zstd-systemd-fuzz \
                   -runs=100 -max_len=1048576 /tmp/control' \
             > "$evidence/control.log" 2>&1
+          coverage_counters=$(sed -n \
+            's/.*counters): \([0-9][0-9]*\) .*/\1/p' \
+            "$evidence/control.log" | head -n1)
+          test -n "$coverage_counters"
+          test "$coverage_counters" -ge 1000
+          printf 'inline_coverage_counters=%s\n' "$coverage_counters" \
+            | tee "$evidence/coverage-binding.txt"
 
           set +e
           timeout 90s docker run "${common[@]}" \

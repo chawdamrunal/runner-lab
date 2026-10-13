@@ -29,7 +29,7 @@ RUN source_dir=$(find /build -mindepth 1 -maxdepth 1 -type d \
     && make -C lib clean \
     && make -C lib -j2 \
        CC=clang \
-       CFLAGS='-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer' \
+       CFLAGS='-O1 -g -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer' \
        libzstd.a
 
 COPY f005_zstd_systemd_fuzz.c /src/f005_zstd_systemd_fuzz.c
@@ -46,7 +46,7 @@ RUN source_dir=$(cat /usr/local/share/f005-zstd-source-directory.txt) \
       "$source_dir/lib/libzstd.a" \
       -pthread \
     && clang -O1 -g \
-      -fsanitize=address,undefined \
+      -fsanitize=fuzzer-no-link,address,undefined \
       -fno-sanitize-recover=all \
       -fno-omit-frame-pointer \
       -I"$source_dir/lib" \
