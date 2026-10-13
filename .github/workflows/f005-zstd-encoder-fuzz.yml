@@ -1,0 +1,122 @@
+name: f005-zstd-encoder-fuzz
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  exact-encoder:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the owned encoder harness
+        uses: actions/checkout@v4
+
+      - name: Build exact deployed source with sanitizers
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/f005-zstd-evidence"
+          seeds="$RUNNER_TEMP/f005-zstd-seeds"
+          mkdir -p "$evidence" "$seeds"
+          printf 'systemd-coredump-zstd-positive-control\n' \
+            > "$seeds/text"
+          dd if=/dev/zero of="$seeds/zeros-128k" \
+            bs=131072 count=1 status=none
+          awk 'BEGIN { for (i = 0; i < 262144; i++) printf "%c", i % 251 }' \
+            > "$seeds/pattern-256k"
+          sha256sum "$seeds"/* | tee "$evidence/seeds.sha256"
+
+          docker build \
+            --file research/f005-zstd/Dockerfile \
+            --tag f005-zstd-exact:1.5.5 \
+            research/f005-zstd
+          docker run --rm \
+            --entrypoint /bin/bash \
+            f005-zstd-exact:1.5.5 \
+            -c 'set -euo pipefail; cat /usr/local/share/f005-zstd-source-version.txt; /usr/local/bin/f005-zstd-version; ldd /usr/local/bin/f005-zstd-systemd-fuzz; nm /usr/local/bin/f005-zstd-systemd-fuzz | grep -F " T ZSTD_compressStream2"' \
+            | tee "$evidence/build-binding.txt"
+
+      - name: Run deterministic control and bounded exact-API fuzzing
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/f005-zstd-evidence"
+          seeds="$RUNNER_TEMP/f005-zstd-seeds"
+          image=f005-zstd-exact:1.5.5
+          common=(
+            --rm
+            --network none
+            --cap-drop ALL
+            --security-opt no-new-privileges
+            --memory 768m
+            --memory-swap 768m
+            --pids-limit 32
+            --read-only
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m
+            --user "$(id -u):$(id -g)"
+            --mount "type=bind,src=$seeds,dst=/seeds,readonly"
+            --mount "type=bind,src=$evidence,dst=/evidence"
+          )
+
+          docker run "${common[@]}" \
+            --entrypoint /bin/bash \
+            "$image" \
+            -c 'set -euo pipefail
+                mkdir /tmp/control
+                cp /seeds/text /tmp/control/
+                /usr/local/bin/f005-zstd-systemd-fuzz \
+                  -runs=100 -max_len=1048576 /tmp/control' \
+            > "$evidence/control.log" 2>&1
+
+          set +e
+          timeout 90s docker run "${common[@]}" \
+            --entrypoint /bin/bash \
+            "$image" \
+            -c 'set -euo pipefail
+                mkdir /tmp/corpus
+                cp /seeds/* /tmp/corpus/
+                /usr/local/bin/f005-zstd-systemd-fuzz \
+                  -max_total_time=60 \
+                  -timeout=5 \
+                  -rss_limit_mb=512 \
+                  -max_len=1048576 \
+                  -artifact_prefix=/evidence/crash- \
+                  /tmp/corpus' \
+            > "$evidence/fuzz.log" 2>&1
+          fuzz_status=$?
+          set -e
+
+          printf 'control_status=0\nfuzz_status=%s\n' "$fuzz_status" \
+            | tee "$evidence/status.txt"
+          tail -n 80 "$evidence/control.log"
+          tail -n 160 "$evidence/fuzz.log"
+
+          if find "$evidence" -maxdepth 1 -type f -name 'crash-*' \
+               | grep -q .; then
+            printf 'classification=exact-encoder-candidate-produced\n' \
+              | tee "$evidence/classification.txt"
+          elif grep -Eq 'AddressSanitizer|runtime error:|ERROR: libFuzzer' \
+                 "$evidence/fuzz.log"; then
+            printf 'classification=sanitizer-effect-without-artifact\n' \
+              | tee "$evidence/classification.txt"
+          elif [ "$fuzz_status" -eq 0 ]; then
+            printf 'classification=no-candidate-in-bounded-campaign\n' \
+              | tee "$evidence/classification.txt"
+          else
+            printf 'classification=inconclusive-fuzz-status-%s\n' \
+              "$fuzz_status" \
+              | tee "$evidence/classification.txt"
+          fi
+
+      - name: Upload bounded encoder evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f005-zstd-encoder-${{ github.run_id }}
+          path: ${{ runner.temp }}/f005-zstd-evidence
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 6
