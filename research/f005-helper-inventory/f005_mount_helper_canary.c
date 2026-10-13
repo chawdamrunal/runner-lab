@@ -21,7 +21,7 @@ int main(int argc, char **argv) {
     return 90;
   }
 
-  int fd = open(output_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+  int fd = open(output_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644);
   if (fd < 0) {
     dprintf(STDERR_FILENO, "canary_open_failed path=%s errno=%d\n", output_path, errno);
     return 91;
