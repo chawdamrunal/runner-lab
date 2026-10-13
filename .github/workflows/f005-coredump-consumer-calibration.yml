@@ -84,6 +84,7 @@ jobs:
 
             docker create \
               --name "$name" \
+              --init \
               --user dependabot \
               --network none \
               --memory 8g \
@@ -91,7 +92,16 @@ jobs:
               --entrypoint /f005-core-probe \
               "$image" "$dumpable" > "$evidence/$arm-container-id.txt"
             docker start "$name" >/dev/null
-            host_pid=$(docker inspect --format '{{.State.Pid}}' "$name")
+            host_pid=""
+            for attempt in $(seq 1 20); do
+              host_pid=$(docker top "$name" -eo pid,comm \
+                | awk '$2 == "f005-core-probe" { print $1; exit }')
+              if [ -n "$host_pid" ]; then
+                break
+              fi
+              sleep 0.1
+            done
+            test -n "$host_pid"
             printf 'arm=%s\nhost_pid=%s\n' "$arm" "$host_pid" | tee "$log"
 
             status=$(docker wait "$name")
