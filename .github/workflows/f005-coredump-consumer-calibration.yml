@@ -50,8 +50,7 @@ jobs:
           }')
           gcc -O0 -g -Wall -Wextra -Werror \
             -Wl,--build-id=sha1 \
-            -Xlinker --package-metadata \
-            -Xlinker "$package_json" \
+            -Xlinker "--package-metadata=$package_json" \
             -o "$RUNNER_TEMP/f005-core-probe" \
             research/f005-coredump/f005_core_probe.c
           chmod 0755 "$RUNNER_TEMP/f005-core-probe"
