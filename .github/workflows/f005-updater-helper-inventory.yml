@@ -66,11 +66,13 @@ jobs:
                 printf "getcap_unavailable=true\n" > /evidence/file-capabilities.txt
               fi
 
-              find / -xdev -type f \( -perm -0002 -o -perm -0020 \) \
-                -printf "mode=%m uid=%u gid=%g path=%p\n" 2>/dev/null \
+              { find / -xdev -type f \( -perm -0002 -o -perm -0020 \) \
+                  -printf "mode=%m uid=%u gid=%g path=%p\n" \
+                  2>/evidence/group-world-writable-files.errors.txt || :; } \
                 | sort > /evidence/group-world-writable-files.txt
-              find / -xdev -type d \( -perm -0002 -o -perm -0020 \) \
-                -printf "mode=%m uid=%u gid=%g path=%p\n" 2>/dev/null \
+              { find / -xdev -type d \( -perm -0002 -o -perm -0020 \) \
+                  -printf "mode=%m uid=%u gid=%g path=%p\n" \
+                  2>/evidence/group-world-writable-dirs.errors.txt || :; } \
                 | sort > /evidence/group-world-writable-dirs.txt
               cat /etc/os-release > /evidence/os-release.txt
               dpkg-query -W -f="\${binary:Package}\\t\${Version}\\n" \
