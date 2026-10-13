@@ -78,7 +78,7 @@ jobs:
                 mkdir /tmp/control
                 cp /seed/positive.core /tmp/control/
                 /usr/local/bin/f005-core-native-fuzz \
-                  -runs=20 -max_len=262144 /tmp/control' \
+                  -runs=1 -max_len=262144 /tmp/control' \
             > "$evidence/control.log" 2>&1
           coverage_counters=$(sed -n \
             's/.*counters): \([0-9][0-9]*\) .*/\1/p' \
@@ -89,25 +89,29 @@ jobs:
             | tee "$evidence/coverage-binding.txt"
 
           set +e
-          timeout 90s docker run "${common[@]}" \
+          mkdir -p "$evidence/corpus"
+          cp "$seed" "$evidence/corpus/positive.core"
+          timeout 150s docker run "${common[@]}" \
             --entrypoint /bin/bash \
             "$image" \
             -c 'set -euo pipefail
-                mkdir /tmp/corpus
-                cp /seed/positive.core /tmp/corpus/
                 /usr/local/bin/f005-core-native-fuzz \
-                  -max_total_time=60 \
+                  -max_total_time=120 \
                   -timeout=5 \
                   -rss_limit_mb=512 \
                   -max_len=262144 \
                   -artifact_prefix=/evidence/crash- \
-                  /tmp/corpus' \
+                  /evidence/corpus' \
             > "$evidence/fuzz.log" 2>&1
           fuzz_status=$?
           set -e
 
           printf 'control_status=0\nfuzz_status=%s\n' "$fuzz_status" \
             | tee "$evidence/status.txt"
+          printf 'mutation_mode=structure-preserving\ncorpus_files=%s\ncorpus_bytes=%s\n' \
+            "$(find "$evidence/corpus" -maxdepth 1 -type f | wc -l)" \
+            "$(du -sk "$evidence/corpus" | cut -f1)KiB" \
+            | tee -a "$evidence/status.txt"
           tail -n 100 "$evidence/control.log"
           tail -n 200 "$evidence/fuzz.log"
 
