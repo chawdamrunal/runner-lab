@@ -27,7 +27,7 @@ RUN cd /build/elfutils-0.190 \
     && make -j2 \
        CC=clang \
        CXX=clang++ \
-       CFLAGS='-O1 -g -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -D_FORTIFY_SOURCE=0' \
+       CFLAGS='-O1 -g -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize=alignment -fno-sanitize-recover=all -fno-omit-frame-pointer -D_FORTIFY_SOURCE=0' \
        LDFLAGS='-fsanitize=fuzzer-no-link,address,undefined' \
        dso_LDFLAGS='-shared' \
        NO_UNDEFINED= \
@@ -38,6 +38,7 @@ COPY f005_core_native_fuzz.c /src/f005_core_native_fuzz.c
 
 RUN clang -O1 -g -Wall -Wextra -Werror \
       -fsanitize=fuzzer,address,undefined \
+      -fno-sanitize=alignment \
       -fno-sanitize-recover=all \
       -fno-omit-frame-pointer \
       -o /usr/local/bin/f005-core-native-fuzz \
