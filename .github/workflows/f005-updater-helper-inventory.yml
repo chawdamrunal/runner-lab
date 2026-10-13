@@ -35,20 +35,21 @@ jobs:
           set -euo pipefail
           image='ghcr.io/dependabot/dependabot-updater-bundler:v2.0.20261007230529@sha256:0c3e2ed47adc7b21b82ac89c11a8768ae69c839c01f99b609f187fddd3431f89'
           evidence="$RUNNER_TEMP/f005-updater-helper-inventory"
-          common=(
+          sandbox=(
             --rm
             --network none
             --cap-drop ALL
             --security-opt no-new-privileges
-            --read-only
             --tmpfs /tmp:rw,nosuid,nodev,size=64m
             --pids-limit 64
             --memory 512m
             --memory-swap 512m
             --mount "type=bind,src=$evidence,dst=/evidence"
           )
+          readonly_sandbox=("${sandbox[@]}" --read-only)
 
-          docker run "${common[@]}" --user root --entrypoint /bin/bash \
+          docker run "${readonly_sandbox[@]}" --cap-add DAC_OVERRIDE \
+            --user root --entrypoint /bin/bash \
             "$image" -c '
               set -euo pipefail
               : > /evidence/suid-sgid.txt
@@ -79,7 +80,7 @@ jobs:
                 | sort > /evidence/packages.txt
             '
 
-          docker run "${common[@]}" --user dependabot --entrypoint /bin/bash \
+          docker run "${readonly_sandbox[@]}" --user dependabot --entrypoint /bin/bash \
             "$image" -c '
               set -euo pipefail
               id
@@ -91,13 +92,34 @@ jobs:
                   if [ -w "$path" ]; then printf "dependabot_writable=true path=%s\n" "$path"; fi
                 fi
               done
-            ' > "$evidence/dependabot-path.txt"
+            ' > "$evidence/dependabot-path-readonly.txt"
+
+          docker run "${readonly_sandbox[@]}" --cap-add DAC_OVERRIDE \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/research/f005-helper-inventory/scan_file_caps.py,dst=/scan_file_caps.py,readonly" \
+            --user root --entrypoint /usr/bin/python3 \
+            "$image" /scan_file_caps.py \
+            > "$evidence/file-capability-xattrs.txt" \
+            2> "$evidence/file-capability-xattrs.context.txt"
+
+          docker run "${sandbox[@]}" --user dependabot --entrypoint /bin/bash \
+            "$image" -c '
+              set -euo pipefail
+              canary=/home/dependabot/bin/f005-owned-write-canary
+              test ! -e "$canary"
+              : > "$canary"
+              test -f "$canary"
+              printf "owned_canary_created=true path=%s\n" "$canary"
+              rm -f "$canary"
+              test ! -e "$canary"
+              printf "owned_canary_removed=true path=%s\n" "$canary"
+            ' > "$evidence/dependabot-path-writable-overlay.txt"
 
           suid_count=$(grep -c '^mode=' "$evidence/suid-sgid.txt" || true)
-          filecap_count=$(grep -c ' = ' "$evidence/file-capabilities.txt" || true)
-          writable_path_count=$(grep -c '^dependabot_writable=true' "$evidence/dependabot-path.txt" || true)
-          printf 'suid_sgid_count=%s\nfilecap_count=%s\nwritable_path_count=%s\n' \
-            "$suid_count" "$filecap_count" "$writable_path_count" \
+          filecap_count=$(grep -c '^path=' "$evidence/file-capability-xattrs.txt" || true)
+          readonly_writable_path_count=$(grep -c '^dependabot_writable=true' "$evidence/dependabot-path-readonly.txt" || true)
+          writable_overlay_canary_count=$(grep -c '^owned_canary_created=true' "$evidence/dependabot-path-writable-overlay.txt" || true)
+          printf 'suid_sgid_count=%s\nfilecap_xattr_count=%s\nreadonly_writable_path_count=%s\nwritable_overlay_canary_count=%s\n' \
+            "$suid_count" "$filecap_count" "$readonly_writable_path_count" "$writable_overlay_canary_count" \
             | tee "$evidence/status.txt"
 
       - name: Upload exact helper inventory
