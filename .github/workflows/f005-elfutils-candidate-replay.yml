@@ -1,0 +1,115 @@
+name: f005-elfutils-candidate-replay
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TESTCASE_URL: https://oss-fuzz.com/download?testcase_id=5773761388544000
+      TESTCASE_SHA256: f73c4389649df30a60da5aa372745eb4bf22f7d6c46dd611268532a86409a226
+    steps:
+      - name: Check out the owned replay harness
+        uses: actions/checkout@v4
+
+      - name: Build the exact-version replay image
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/f005-elfutils-evidence"
+          mkdir -p "$evidence"
+          curl --fail --show-error --silent --location \
+            --max-time 30 \
+            "$TESTCASE_URL" \
+            --output "$RUNNER_TEMP/f005-elfutils-testcase"
+          printf '%s  %s\n' \
+            "$TESTCASE_SHA256" \
+            "$RUNNER_TEMP/f005-elfutils-testcase" \
+            | sha256sum --check
+          sha256sum "$RUNNER_TEMP/f005-elfutils-testcase" \
+            | tee "$evidence/testcase.sha256"
+          stat --printf='testcase_bytes=%s\n' \
+            "$RUNNER_TEMP/f005-elfutils-testcase" \
+            | tee "$evidence/testcase-size.txt"
+          docker build \
+            --tag f005-elfutils-replay:0.190-1.1ubuntu0.1 \
+            research/f005-elfutils
+          docker run --rm \
+            --entrypoint /bin/cat \
+            f005-elfutils-replay:0.190-1.1ubuntu0.1 \
+            /usr/local/share/f005-elfutils-versions.txt \
+            | tee "$evidence/package-versions.txt"
+
+      - name: Replay negative and public candidate with host dumps disabled
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/f005-elfutils-evidence"
+          image=f005-elfutils-replay:0.190-1.1ubuntu0.1
+          common=(
+            --rm
+            --network none
+            --cap-drop ALL
+            --security-opt no-new-privileges
+            --memory 256m
+            --memory-swap 256m
+            --pids-limit 32
+            --read-only
+            --tmpfs /tmp:rw,nosuid,nodev,size=16m
+            --user 1000:1000
+          )
+
+          set +e
+          timeout 10s docker run "${common[@]}" \
+            "$image" /bin/true \
+            > "$evidence/negative.log" 2>&1
+          negative_status=$?
+
+          timeout 10s docker run "${common[@]}" \
+            --mount "type=bind,src=$RUNNER_TEMP/f005-elfutils-testcase,dst=/input/candidate,readonly" \
+            "$image" /input/candidate \
+            > "$evidence/candidate.log" 2>&1
+          candidate_status=$?
+          set -e
+
+          printf 'negative_status=%s\ncandidate_status=%s\n' \
+            "$negative_status" "$candidate_status" \
+            | tee "$evidence/status.txt"
+          cat "$evidence/negative.log"
+          cat "$evidence/candidate.log"
+
+          test "$negative_status" -eq 0
+          case "$candidate_status" in
+            0)
+              printf 'classification=not-reproduced-with-packaged-library\n' \
+                | tee "$evidence/classification.txt"
+              ;;
+            139)
+              printf 'classification=segfault-candidate-only\n' \
+                | tee "$evidence/classification.txt"
+              ;;
+            124)
+              printf 'classification=timeout-candidate-only\n' \
+                | tee "$evidence/classification.txt"
+              ;;
+            *)
+              printf 'classification=nonzero-candidate-status-%s\n' \
+                "$candidate_status" \
+                | tee "$evidence/classification.txt"
+              ;;
+          esac
+
+      - name: Upload bounded replay evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f005-elfutils-replay-${{ github.run_id }}
+          path: ${{ runner.temp }}/f005-elfutils-evidence
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 6
