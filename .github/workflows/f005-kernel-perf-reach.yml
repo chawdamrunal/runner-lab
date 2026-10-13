@@ -1,0 +1,93 @@
+name: f005-kernel-perf-reach
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  exact-updater-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the owned reachability harness
+        uses: actions/checkout@v4
+
+      - name: Discriminate perf syscall and policy reach
+        shell: bash
+        run: |
+          set -euo pipefail
+          image='ghcr.io/dependabot/dependabot-updater-bundler:v2.0.20261007230529@sha256:0c3e2ed47adc7b21b82ac89c11a8768ae69c839c01f99b609f187fddd3431f89'
+          evidence="$RUNNER_TEMP/f005-kernel-perf-reach"
+          mkdir -p "$evidence/default-seccomp" "$evidence/unconfined-seccomp"
+          chmod -R 0777 "$evidence"
+
+          docker pull "$image"
+          docker image inspect "$image" \
+            --format 'repo_digests={{json .RepoDigests}} image_id={{.Id}}' \
+            > "$evidence/image-binding.txt"
+          uname -a > "$evidence/host-uname.txt"
+
+          common=(
+            --rm
+            --network none
+            --pids-limit 64
+            --memory 512m
+            --memory-swap 512m
+            --mount "type=bind,src=$GITHUB_WORKSPACE/research/f005-kernel-reach/f005_perf_reach.c,dst=/probe.c,readonly"
+            --user dependabot
+            --entrypoint /bin/bash
+          )
+
+          docker run "${common[@]}" \
+            --mount "type=bind,src=$evidence/default-seccomp,dst=/evidence" \
+            "$image" -c '
+              set -euo pipefail
+              grep -E "^(Uid|Gid|CapInh|CapPrm|CapEff|CapBnd|CapAmb|NoNewPrivs|Seccomp):" \
+                /proc/self/status > /evidence/actor-status.txt
+              for key in perf_event_paranoid unprivileged_bpf_disabled unprivileged_userns_clone kptr_restrict dmesg_restrict; do
+                path="/proc/sys/kernel/$key"
+                if [ -r "$path" ]; then
+                  printf "%s=" "$key"
+                  tr -d "\n" < "$path"
+                  printf "\n"
+                else
+                  printf "%s=unreadable\n" "$key"
+                fi
+              done > /evidence/kernel-policy.txt
+              cc -O2 -Wall -Wextra -Werror -o /tmp/f005-perf-reach /probe.c
+              /tmp/f005-perf-reach > /evidence/result.txt
+            '
+
+          docker run "${common[@]}" \
+            --security-opt seccomp=unconfined \
+            --mount "type=bind,src=$evidence/unconfined-seccomp,dst=/evidence" \
+            "$image" -c '
+              set -euo pipefail
+              grep -E "^(Uid|Gid|CapInh|CapPrm|CapEff|CapBnd|CapAmb|NoNewPrivs|Seccomp):" \
+                /proc/self/status > /evidence/actor-status.txt
+              for key in perf_event_paranoid unprivileged_bpf_disabled unprivileged_userns_clone kptr_restrict dmesg_restrict; do
+                path="/proc/sys/kernel/$key"
+                if [ -r "$path" ]; then
+                  printf "%s=" "$key"
+                  tr -d "\n" < "$path"
+                  printf "\n"
+                else
+                  printf "%s=unreadable\n" "$key"
+                fi
+              done > /evidence/kernel-policy.txt
+              cc -O2 -Wall -Wextra -Werror -o /tmp/f005-perf-reach /probe.c
+              /tmp/f005-perf-reach > /evidence/result.txt
+            '
+
+      - name: Upload kernel perf reachability evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f005-kernel-perf-reach-${{ github.run_id }}
+          path: ${{ runner.temp }}/f005-kernel-perf-reach
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 6
