@@ -27,6 +27,8 @@ RUN cd /build/elfutils-0.190 \
        CC=clang \
        CFLAGS='-O1 -g -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -D_FORTIFY_SOURCE=0' \
        LDFLAGS='-fsanitize=fuzzer-no-link,address,undefined' \
+       dso_LDFLAGS='-shared' \
+       NO_UNDEFINED= \
     && dpkg-parsechangelog -S Version \
        > /usr/local/share/f005-elfutils-source-version.txt
 
