@@ -1,0 +1,116 @@
+name: f005-kernel-ktls-reach
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  exact-updater-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the owned kTLS reachability harness
+        uses: actions/checkout@v4
+
+      - name: Capture passive host kTLS state and test benign ULP attachment
+        shell: bash
+        run: |
+          set -euo pipefail
+          image='ghcr.io/dependabot/dependabot-updater-bundler:v2.0.20261007230529@sha256:0c3e2ed47adc7b21b82ac89c11a8768ae69c839c01f99b609f187fddd3431f89'
+          evidence="$RUNNER_TEMP/f005-kernel-ktls-reach"
+          mkdir -p "$evidence/host-before" "$evidence/host-after-pull" \
+            "$evidence/default-seccomp" "$evidence/unconfined-seccomp" \
+            "$evidence/host-after"
+          chmod -R 0777 "$evidence"
+
+          capture_host_state() {
+            destination="$1"
+            uname -a > "$destination/uname.txt"
+            if [ -r /proc/sys/net/ipv4/tcp_available_ulp ]; then
+              cat /proc/sys/net/ipv4/tcp_available_ulp \
+                > "$destination/tcp_available_ulp.txt"
+            else
+              printf 'unreadable\n' > "$destination/tcp_available_ulp.txt"
+            fi
+            if grep -E '^(tls|tls_[^ ]*) ' /proc/modules \
+                > "$destination/tls-modules.txt"; then
+              :
+            else
+              printf 'absent\n' > "$destination/tls-modules.txt"
+            fi
+          }
+
+          capture_host_state "$evidence/host-before"
+          docker pull "$image"
+          docker image inspect "$image" \
+            --format 'repo_digests={{json .RepoDigests}} image_id={{.Id}}' \
+            > "$evidence/image-binding.txt"
+          capture_host_state "$evidence/host-after-pull"
+
+          common=(
+            --rm
+            --network none
+            --pids-limit 32
+            --memory 256m
+            --memory-swap 256m
+            --mount "type=bind,src=$GITHUB_WORKSPACE/research/f005-kernel-reach/f005_ktls_reach.c,dst=/probe.c,readonly"
+            --user dependabot
+            --entrypoint /bin/bash
+          )
+
+          for mode in default-seccomp unconfined-seccomp; do
+            security=()
+            if [ "$mode" = unconfined-seccomp ]; then
+              security=(--security-opt seccomp=unconfined)
+            fi
+            docker run "${common[@]}" "${security[@]}" \
+              --mount "type=bind,src=$evidence/$mode,dst=/evidence" \
+              "$image" -c '
+                set -euo pipefail
+                grep -E "^(Uid|Gid|CapInh|CapPrm|CapEff|CapBnd|CapAmb|NoNewPrivs|Seccomp):" \
+                  /proc/self/status > /evidence/actor-status.txt
+                if [ -r /proc/sys/net/ipv4/tcp_available_ulp ]; then
+                  cat /proc/sys/net/ipv4/tcp_available_ulp \
+                    > /evidence/tcp_available_ulp-before.txt
+                else
+                  printf "unreadable\n" \
+                    > /evidence/tcp_available_ulp-before.txt
+                fi
+                if grep -E "^(tls|tls_[^ ]*) " /proc/modules \
+                    > /evidence/tls-modules-before.txt; then
+                  :
+                else
+                  printf "absent\n" > /evidence/tls-modules-before.txt
+                fi
+                cc -O2 -Wall -Wextra -Werror -o /tmp/f005-ktls-reach /probe.c
+                /tmp/f005-ktls-reach > /evidence/result.txt
+                if [ -r /proc/sys/net/ipv4/tcp_available_ulp ]; then
+                  cat /proc/sys/net/ipv4/tcp_available_ulp \
+                    > /evidence/tcp_available_ulp-after.txt
+                else
+                  printf "unreadable\n" \
+                    > /evidence/tcp_available_ulp-after.txt
+                fi
+                if grep -E "^(tls|tls_[^ ]*) " /proc/modules \
+                    > /evidence/tls-modules-after.txt; then
+                  :
+                else
+                  printf "absent\n" > /evidence/tls-modules-after.txt
+                fi
+              '
+          done
+
+          capture_host_state "$evidence/host-after"
+
+      - name: Upload kTLS reachability evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f005-kernel-ktls-reach-${{ github.run_id }}
+          path: ${{ runner.temp }}/f005-kernel-ktls-reach
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 6
