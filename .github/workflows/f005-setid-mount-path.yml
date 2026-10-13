@@ -1,0 +1,86 @@
+name: f005-setid-mount-path
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  exact-updater-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the owned helper harness
+        uses: actions/checkout@v4
+
+      - name: Exercise setuid mount helper resolution
+        shell: bash
+        run: |
+          set -euo pipefail
+          image='ghcr.io/dependabot/dependabot-updater-bundler:v2.0.20261007230529@sha256:0c3e2ed47adc7b21b82ac89c11a8768ae69c839c01f99b609f187fddd3431f89'
+          evidence="$RUNNER_TEMP/f005-setid-mount-path"
+          mkdir -p "$evidence"
+          chmod 0777 "$evidence"
+          docker pull "$image"
+          docker image inspect "$image" \
+            --format 'repo_digests={{json .RepoDigests}} image_id={{.Id}}' \
+            > "$evidence/image-binding.txt"
+
+          docker run --rm \
+            --network none \
+            --pids-limit 64 \
+            --memory 512m \
+            --memory-swap 512m \
+            --mount "type=bind,src=$evidence,dst=/evidence" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/research/f005-helper-inventory/f005_mount_helper_canary.c,dst=/probe.c,readonly" \
+            --user dependabot \
+            --entrypoint /bin/bash \
+            "$image" -c '
+              set -euo pipefail
+              grep -E "^(Uid|Gid|CapInh|CapPrm|CapEff|CapBnd|CapAmb|NoNewPrivs|Seccomp):" \
+                /proc/self/status > /evidence/actor-status.txt
+              stat --printf="mode=%a uid=%u gid=%g path=%n\n" /usr/bin/mount \
+                > /evidence/installed-mount.txt
+
+              cc -O2 -Wall -Wextra -Werror -o /home/dependabot/bin/mount.f005positive /probe.c
+              cp /home/dependabot/bin/mount.f005positive /home/dependabot/bin/mount.f005setid
+              cp /home/dependabot/bin/mount.f005positive /home/dependabot/bin/mount.f005nosuid
+              chmod 0755 /home/dependabot/bin/mount.f005positive \
+                /home/dependabot/bin/mount.f005setid \
+                /home/dependabot/bin/mount.f005nosuid
+              mkdir -p /tmp/f005-target-setid /tmp/f005-target-nosuid
+
+              set +e
+              mount.f005positive --positive-control \
+                > /evidence/positive.stdout.txt 2> /evidence/positive.stderr.txt
+              positive_status=$?
+              /usr/bin/mount -t f005setid none /tmp/f005-target-setid \
+                > /evidence/setid.stdout.txt 2> /evidence/setid.stderr.txt
+              setid_status=$?
+              cp /usr/bin/mount /tmp/mount-nosuid
+              chmod 0755 /tmp/mount-nosuid
+              /tmp/mount-nosuid -t f005nosuid none /tmp/f005-target-nosuid \
+                > /evidence/nosuid.stdout.txt 2> /evidence/nosuid.stderr.txt
+              nosuid_status=$?
+              set -e
+
+              stat --printf="mode=%a uid=%u gid=%g path=%n\n" /tmp/mount-nosuid \
+                > /evidence/copied-mount.txt
+              printf "positive_status=%s\nsetid_status=%s\nnosuid_status=%s\n" \
+                "$positive_status" "$setid_status" "$nosuid_status" \
+                > /evidence/status.txt
+              find /evidence -maxdepth 1 -type f -printf "%f\n" | sort \
+                > /evidence/evidence-files.txt
+            '
+
+      - name: Upload mount helper evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f005-setid-mount-path-${{ github.run_id }}
+          path: ${{ runner.temp }}/f005-setid-mount-path
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 6
