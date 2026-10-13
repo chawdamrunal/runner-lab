@@ -1,0 +1,102 @@
+name: f005-elfutils-sanitized-replay
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sanitized-replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TESTCASE_URL: https://oss-fuzz.com/download?testcase_id=5773761388544000
+      TESTCASE_SHA256: f73c4389649df30a60da5aa372745eb4bf22f7d6c46dd611268532a86409a226
+    steps:
+      - name: Check out the owned replay harness
+        uses: actions/checkout@v4
+
+      - name: Build exact patched source with sanitizers
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/f005-elfutils-sanitized-evidence"
+          mkdir -p "$evidence"
+          curl --fail --show-error --silent --location \
+            --max-time 30 \
+            "$TESTCASE_URL" \
+            --output "$RUNNER_TEMP/f005-elfutils-testcase"
+          printf '%s  %s\n' \
+            "$TESTCASE_SHA256" \
+            "$RUNNER_TEMP/f005-elfutils-testcase" \
+            | sha256sum --check
+          sha256sum "$RUNNER_TEMP/f005-elfutils-testcase" \
+            | tee "$evidence/testcase.sha256"
+          docker build \
+            --file research/f005-elfutils/Dockerfile.sanitized \
+            --tag f005-elfutils-sanitized:0.190-1.1ubuntu0.1 \
+            research/f005-elfutils
+          docker run --rm \
+            --entrypoint /bin/bash \
+            f005-elfutils-sanitized:0.190-1.1ubuntu0.1 \
+            -c 'cat /usr/local/share/f005-elfutils-source-version.txt; ldd /usr/local/bin/f005-libdwfl-replay-sanitized' \
+            | tee "$evidence/build-binding.txt"
+
+      - name: Replay controls under ASan and UBSan
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/f005-elfutils-sanitized-evidence"
+          image=f005-elfutils-sanitized:0.190-1.1ubuntu0.1
+          common=(
+            --rm
+            --network none
+            --cap-drop ALL
+            --security-opt no-new-privileges
+            --memory 512m
+            --memory-swap 512m
+            --pids-limit 32
+            --read-only
+            --tmpfs /tmp:rw,nosuid,nodev,size=32m
+            --user 1000:1000
+          )
+
+          set +e
+          timeout 15s docker run "${common[@]}" \
+            "$image" /bin/true \
+            > "$evidence/negative.log" 2>&1
+          negative_status=$?
+
+          timeout 15s docker run "${common[@]}" \
+            --mount "type=bind,src=$RUNNER_TEMP/f005-elfutils-testcase,dst=/input/candidate,readonly" \
+            "$image" /input/candidate \
+            > "$evidence/candidate.log" 2>&1
+          candidate_status=$?
+          set -e
+
+          printf 'negative_status=%s\ncandidate_status=%s\n' \
+            "$negative_status" "$candidate_status" \
+            | tee "$evidence/status.txt"
+          cat "$evidence/negative.log"
+          cat "$evidence/candidate.log"
+
+          test "$negative_status" -eq 0
+          if [ "$candidate_status" -eq 0 ]; then
+            printf 'classification=not-reproduced-with-sanitized-exact-source\n' \
+              | tee "$evidence/classification.txt"
+          else
+            printf 'classification=sanitizer-or-runtime-candidate-status-%s\n' \
+              "$candidate_status" \
+              | tee "$evidence/classification.txt"
+          fi
+
+      - name: Upload bounded sanitizer evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f005-elfutils-sanitized-${{ github.run_id }}
+          path: ${{ runner.temp }}/f005-elfutils-sanitized-evidence
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 6
